@@ -27,10 +27,11 @@ from __future__ import annotations
 
 import numpy as np
 from astropy.time import Time
-from astropy.coordinates import get_body_barycentric
+from astropy.coordinates import SkyCoord, get_body_barycentric
 import astropy.units as u
 
 from eigsep_base.const import R_MOON, R_SUN, R_EARTH
+from healjax.coord import rot_m
 
 from .observer import ICRS2GAL, _moon_icrs2mcmf
 
@@ -163,3 +164,213 @@ def moon_surface_intersection_mcmf(orbit, times, sky_dirs_gal):
         icrs2mcmf = _moon_icrs2mcmf(t)
         out[i] = (icrs2mcmf @ (gal2icrs @ normal_gal[i].T)).T
     return out
+
+
+# ---------------------------------------------------------------------------
+# Position-based geometry (absorbed from bloom21cm/src/moon_geometry.py)
+#
+# The functions above take a ``LunarOrbit`` and a ``Time`` array; the ones
+# below take raw spacecraft position vectors instead, which is what the
+# quiet-window analysis scripts and sky-coverage figures need when there is
+# no orbit object in hand.  They implement the same ray-sphere test.
+# ---------------------------------------------------------------------------
+
+
+def body_direction_from_moon_gal(body, obs_times):
+    """Unit vector(s) from the Moon toward ``body``, galactic Cartesian.
+
+    Single-body, direction-only counterpart to :func:`body_directions_gal`
+    (which returns dicts of directions *and* distances for several bodies at
+    once).  Accepts a scalar ``Time`` and then returns a bare ``(3,)`` vector,
+    which :func:`body_directions_gal` does not.
+
+    Parameters
+    ----------
+    body : str
+        Any body name accepted by
+        ``astropy.coordinates.get_body_barycentric`` (e.g. ``"earth"``,
+        ``"sun"``).
+    obs_times : astropy.time.Time
+        Scalar or array-valued.
+
+    Returns
+    -------
+    ndarray, shape (3,) or (n_times, 3)
+    """
+    r_body = get_body_barycentric(body, obs_times)
+    r_moon = get_body_barycentric("moon", obs_times)
+    vec = np.column_stack([
+        (r_body.x - r_moon.x).to_value(u.au),
+        (r_body.y - r_moon.y).to_value(u.au),
+        (r_body.z - r_moon.z).to_value(u.au),
+    ])
+    vec /= np.linalg.norm(vec, axis=1, keepdims=True)
+    sc = SkyCoord(x=vec[:, 0], y=vec[:, 1], z=vec[:, 2],
+                  representation_type="cartesian", frame="icrs")
+    gal = sc.galactic.cartesian
+    out = np.column_stack([gal.x.value, gal.y.value, gal.z.value])
+    return out[0] if obs_times.isscalar else out
+
+
+def moon_limb_cos_angle(spacecraft_pos_m):
+    """cos(theta_moon) at each position, theta_moon = arcsin(R_MOON / d).
+
+    Parameters
+    ----------
+    spacecraft_pos_m : ndarray, shape (3,) or (n, 3)
+        Spacecraft position(s) relative to the Moon centre [m].
+
+    Returns
+    -------
+    float or ndarray, shape (n,)
+    """
+    pos = np.asarray(spacecraft_pos_m, dtype=float)
+    d = np.linalg.norm(pos, axis=-1)
+    return np.sqrt(np.maximum(0.0, 1.0 - (R_MOON / d) ** 2))
+
+
+def earth_illuminated_fraction(obs_times):
+    """Earth's Sun-illuminated fraction as seen from the Moon, per time.
+
+    Phase angle is the Sun-Earth-Moon angle (Moon as observer); illuminated
+    fraction follows the standard ``(1 + cos(phase)) / 2`` convention used
+    for planetary phase (full at phase 0, new at phase 180 deg).
+
+    Parameters
+    ----------
+    obs_times : astropy.time.Time
+        Scalar or array-valued.
+
+    Returns
+    -------
+    float or ndarray, shape (n_times,)
+        Illuminated fraction in [0, 1].
+    """
+    sun_dir = np.atleast_2d(body_direction_from_moon_gal("sun", obs_times))
+    earth_dir = np.atleast_2d(body_direction_from_moon_gal("earth", obs_times))
+    cos_phase = np.sum(sun_dir * earth_dir, axis=-1)
+    frac = 0.5 * (1.0 + cos_phase)
+    return float(frac[0]) if obs_times.isscalar else frac
+
+
+def occulted_by_moon(spacecraft_pos_m, direction_gal):
+    """Whether ``direction_gal`` is blocked by the Moon from a position.
+
+    Same ray-sphere test as :func:`body_occulted_by_moon` and
+    ``LunarOrbit.above_horizon_stack``, but driven by explicit position
+    vectors rather than an orbit object, and applied to an arbitrary batch
+    of directions rather than a fixed HEALPix grid.
+
+    Parameters
+    ----------
+    spacecraft_pos_m : ndarray, shape (3,) or (n, 3)
+        Spacecraft position(s) relative to the Moon centre [m].
+    direction_gal : ndarray, shape (3,) or (n, 3)
+        Unit direction(s) in galactic Cartesian coordinates (e.g. from
+        :func:`body_direction_from_moon_gal`).  Broadcasts against
+        ``spacecraft_pos_m``.
+
+    Returns
+    -------
+    bool or ndarray of bool, shape (n,)
+        True where the direction is occulted (blocked by the Moon).
+    """
+    pos = np.asarray(spacecraft_pos_m, dtype=float)
+    d = np.linalg.norm(pos, axis=-1, keepdims=True)
+    r_hat = pos / d
+    direction = np.asarray(direction_gal, dtype=float)
+    dot = np.sum(r_hat * direction, axis=-1)
+    return dot <= -moon_limb_cos_angle(pos)
+
+
+# ---------------------------------------------------------------------------
+# Ray/surface helpers (absorbed from the former eigsep_sim.utils)
+# ---------------------------------------------------------------------------
+
+
+def moon_surface_distance(angle, d, r=R_MOON):
+    """Distance to the lunar surface along a ray offset by ``angle``.
+
+    Near root of the ray-sphere intersection for a ray leaving an observer
+    at distance ``d`` from the Moon centre, making angle ``angle`` with the
+    direction to that centre.
+
+    Parameters
+    ----------
+    angle : array_like
+        Angle between the ray and the observer->Moon-centre direction [rad].
+    d : float or array_like
+        Observer distance from the Moon centre [m].
+    r : float, optional
+        Moon radius [m].
+
+    Returns
+    -------
+    ndarray
+        Distance along the ray to the surface [m]; ``NaN`` where the ray
+        misses the Moon or the intersection lies behind the observer.
+    """
+    a, b, c = 1, -2 * d * np.cos(angle), d**2 - r**2
+    radical = b**2 - 4 * a * c
+    ans = np.where(
+        radical > 0, -b - np.sqrt(radical.clip(0)) / (2 * a), np.nan
+    )
+    return np.where(ans > 0, ans, np.nan)
+
+
+def moon_reflect_vector(vec_to_surface, moon_pos, r=R_MOON):
+    """Specular reflection of a ray off the lunar sphere.
+
+    Parameters
+    ----------
+    vec_to_surface : ndarray, shape (3, n)
+        Vectors from the observer to the surface intersection points.
+    moon_pos : ndarray, shape (3,)
+        Moon centre position in the same frame.
+    r : float, optional
+        Moon radius [m], used to normalise the surface normal.
+
+    Returns
+    -------
+    ndarray, shape (3, n)
+        Outgoing (reflected) unit direction vectors.
+    """
+    incident = vec_to_surface / np.linalg.norm(vec_to_surface, axis=0)
+    normal = (vec_to_surface - moon_pos[:, None]) / r
+    return incident - 2 * np.einsum("ij,ij->j", incident, normal) * normal
+
+
+def sample_disk(pos, r_ang, nsamples):
+    """Uniformly sample directions within a cone of radius ``r_ang``.
+
+    The cone is centred on ``pos``.  Sampling is uniform in solid angle, so
+    this is the right primitive for Monte-Carlo integration over an extended
+    disk-like source (Sun, Earth) rather than treating it as a point.
+
+    Parameters
+    ----------
+    pos : ndarray, shape (3,)
+        Direction of the cone axis (need not be normalised).
+    r_ang : float
+        Angular radius of the cone [rad].
+    nsamples : int
+        Number of directions to draw.
+
+    Returns
+    -------
+    ndarray, shape (3, nsamples)
+        Unit vectors.
+    """
+    cos_theta = np.random.uniform(np.cos(r_ang), 1, nsamples)
+    theta = np.arccos(cos_theta)
+    phi = np.random.uniform(0, 2 * np.pi, nsamples)
+    x = np.sin(theta) * np.cos(phi)
+    y = np.sin(theta) * np.sin(phi)
+    z = np.cos(theta)
+    samples = np.vstack((x, y, z))
+    pos = pos / np.linalg.norm(pos)
+    z_axis = np.array([0, 0, 1])
+    rot_axis = np.cross(z_axis, pos)
+    rot_axis /= np.linalg.norm(rot_axis)
+    rot_angle = np.arccos(np.dot(z_axis, pos))
+    return rot_m(rot_angle, rot_axis) @ samples

@@ -22,10 +22,22 @@ dependencies = [
     "numpy",
     "scipy",
     "astropy",
+    "eigsep_base",
     "healjax",
+    "healpy",
     "jaxopt",
     "hera_filters",
 ]
+
+# eigsep_base and healjax are not on PyPI yet. Until they are, install them
+# from the sibling checkouts with:
+#     pip install -e ../eigsep_base -e ../healjax
+# then `pip install -e .` here. Uncomment the [tool.uv.sources] block below
+# if you drive the workspace with uv instead.
+#
+# [tool.uv.sources]
+# eigsep_base = { path = "../eigsep_base", editable = true }
+# healjax = { path = "../healjax", editable = true }
 
 [project.optional-dependencies]
 vis = [
