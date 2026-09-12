@@ -23,8 +23,10 @@ import jax
 import jax.numpy as jnp
 import healpy
 
-from .healpix import float_dtype
-from .const import DTYPE_R_NPY, DTYPE_R_JAX
+from eigsep_base.const import DTYPE_R_NPY
+from healjax import FLOAT_TYPE as float_dtype
+
+from ._jax_const import DTYPE_R_JAX
 from .beam import Beam
 from .sky import Sky
 from .observer import Observer

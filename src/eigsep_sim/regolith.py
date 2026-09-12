@@ -97,7 +97,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from .const import c as C_LIGHT
+from eigsep_base.const import c as C_LIGHT
 
 SOLAR_CONSTANT_W_M2 = 1361.0
 STEFAN_BOLTZMANN_W_M2_K4 = 5.670374419e-8

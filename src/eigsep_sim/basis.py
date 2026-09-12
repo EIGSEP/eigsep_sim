@@ -12,7 +12,7 @@ import healpy
 from scipy.interpolate import interp1d
 from abc import ABC, abstractmethod
 
-from .const import DTYPE_R_NPY
+from eigsep_base.const import DTYPE_R_NPY
 
 try:
     import pygdsm
@@ -287,7 +287,7 @@ class BeamBasis(_SpectralBasis):
             arm lengths.
         """
         from .beam import thin_dipole_pattern
-        from .const import c as C_LIGHT
+        from eigsep_base.const import c as C_LIGHT
 
         freqs_hz = np.asarray(freqs_hz, dtype=np.float64)
         if u_body is None:

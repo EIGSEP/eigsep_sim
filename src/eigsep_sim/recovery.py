@@ -351,3 +351,186 @@ def relative_rms(estimate, reference):
         np.sqrt(np.mean((estimate - reference) ** 2))
         / np.sqrt(np.mean(reference**2))
     )
+
+
+# ---------------------------------------------------------------------------
+# Chunked normal equations (absorbed from bloom21cm/src/linear_solver.py)
+#
+# :func:`normal_solve` above forms ``A.T @ A`` from a design matrix that is
+# already in memory.  For long campaigns that matrix is
+# ``(n_total * ndipole, npix + 2)`` and does not fit; the routines below
+# build it a chunk of observations at a time and accumulate the normal
+# equations instead, then hand off to :func:`normal_solve_equations`.
+#
+# Column ordering of A: [sky pixels (npix) | regolith (1) | sun (1)]
+# ---------------------------------------------------------------------------
+
+
+def _build_A_chunk(masks, beams, omega_B, J_SUN, npix, k_start, k_end, n_obs):
+    """Build one chunk of the design matrix (rows ``k_start..k_end-1``)."""
+    chunk_size = k_end - k_start
+    ndipole = beams.shape[1]
+    t_idx = np.arange(chunk_size)
+
+    weights = beams[k_start:k_end] / omega_B[k_start:k_end, :, np.newaxis]
+    m = masks[k_start:k_end]
+
+    j_sun = J_SUN[(k_start + t_idx) % n_obs]  # (chunk_size,)
+
+    A_sky = (weights * m[:, np.newaxis, :]).reshape(
+        chunk_size * ndipole, npix
+    )
+    A_reg = np.sum(
+        weights * (1.0 - m[:, np.newaxis, :]), axis=2
+    ).reshape(chunk_size * ndipole)
+
+    sun_weights = weights[
+        t_idx[:, np.newaxis],
+        np.arange(ndipole)[np.newaxis, :],
+        j_sun[:, np.newaxis],
+    ]  # (chunk_size, ndipole)
+    A_sun = (sun_weights * m[t_idx, j_sun][:, np.newaxis]).reshape(
+        chunk_size * ndipole
+    )
+
+    A_chunk = np.empty((chunk_size * ndipole, npix + 2), dtype=float)
+    A_chunk[:, :npix] = A_sky
+    A_chunk[:, npix] = A_reg
+    A_chunk[:, npix + 1] = A_sun
+    return A_chunk
+
+
+def build_normal_equations(
+    masks, beams, omega_B, J_SUN, npix, x_true=None, chunk_obs=2000
+):
+    """Accumulate ``A.T @ A`` and optionally ``y = A @ x_true`` in chunks.
+
+    Parameters
+    ----------
+    masks : ndarray, shape (n_total, npix)
+    beams : ndarray, shape (n_total, ndipole, npix)
+    omega_B : ndarray, shape (n_total, ndipole)
+    J_SUN : ndarray, shape (n_obs,)
+        Sun pixel indices; ``n_total = n_orbits * n_obs``.
+    npix : int
+    x_true : ndarray, shape (npix + 2,), optional
+        If given, ``y = A @ x_true`` is also returned.
+    chunk_obs : int
+        Observations per chunk.
+
+    Returns
+    -------
+    AtA : ndarray, shape (npix + 2, npix + 2)
+    col_sums : ndarray, shape (npix + 2,)
+        ``A.T @ 1``.
+    y_nl : ndarray, shape (n_total * ndipole,) or None
+    """
+    n_total, ndipole, _ = beams.shape
+    n_obs = len(J_SUN)
+    ncols = npix + 2
+    AtA = np.zeros((ncols, ncols))
+    col_sums = np.zeros(ncols)
+    y_nl = np.zeros(n_total * ndipole) if x_true is not None else None
+
+    for k_start in range(0, n_total, chunk_obs):
+        k_end = min(k_start + chunk_obs, n_total)
+        A_chunk = _build_A_chunk(
+            masks, beams, omega_B, J_SUN, npix, k_start, k_end, n_obs
+        )
+        AtA += A_chunk.T @ A_chunk
+        col_sums += A_chunk.sum(axis=0)
+        if x_true is not None:
+            r0, r1 = k_start * ndipole, k_end * ndipole
+            y_nl[r0:r1] = A_chunk @ x_true
+
+    return AtA, col_sums, y_nl
+
+
+def build_A_right_product(
+    masks, beams, omega_B, J_SUN, npix, V_full, x_vec=None, chunk_obs=2000
+):
+    """Compute ``A @ V_full`` in float32 chunks, optionally also ``A @ x_vec``.
+
+    Parameters
+    ----------
+    masks, beams, omega_B, J_SUN, npix
+        As in :func:`build_normal_equations`.
+    V_full : ndarray, shape (npix + 2, K)
+        Matrix to multiply.
+    x_vec : ndarray, shape (npix + 2,), optional
+        If given, also computes ``A.T @ (A @ x_vec)`` and ``col_sums``.
+    chunk_obs : int
+
+    Returns
+    -------
+    AV_f32 : ndarray, shape (n_total * ndipole, K), float32
+    y_out : ndarray, shape (n_total * ndipole,) or None
+    _ : None
+        Placeholder for API compatibility.
+    At_Ax : ndarray, shape (npix + 2,) or None
+    col_sums : ndarray, shape (npix + 2,) or None
+    """
+    n_total, ndipole, _ = beams.shape
+    n_obs = len(J_SUN)
+    n_rows = n_total * ndipole
+    ncols, n_V = V_full.shape
+
+    AV_f32 = np.zeros((n_rows, n_V), dtype=np.float32)
+    y_out = np.zeros(n_rows) if x_vec is not None else None
+    At_Ax = np.zeros(ncols) if x_vec is not None else None
+    col_sums = np.zeros(ncols) if x_vec is not None else None
+
+    for k_start in range(0, n_total, chunk_obs):
+        k_end = min(k_start + chunk_obs, n_total)
+        A_chunk = _build_A_chunk(
+            masks, beams, omega_B, J_SUN, npix, k_start, k_end, n_obs
+        )
+        r0, r1 = k_start * ndipole, k_end * ndipole
+        AV_f32[r0:r1] = (A_chunk @ V_full).astype(np.float32)
+        if x_vec is not None:
+            Ax_chunk = A_chunk @ x_vec
+            y_out[r0:r1] = Ax_chunk
+            At_Ax += A_chunk.T @ Ax_chunk
+            col_sums += A_chunk.sum(axis=0)
+
+    return AV_f32, y_out, None, At_Ax, col_sums
+
+
+def normal_solve_equations(AtA, Aty, npix, rcond=1e-6):
+    """Solve ``AtA @ x = Aty`` via eigendecomposition.
+
+    Pre-accumulated counterpart to :func:`normal_solve`, which takes the
+    design matrix itself.  Use this together with
+    :func:`build_normal_equations` when ``A`` is too large to materialise.
+
+    Parameters
+    ----------
+    AtA : ndarray, shape (ncols, ncols)
+    Aty : ndarray, shape (ncols,)
+    npix : int
+        The first ``npix`` columns are sky pixels.
+    rcond : float
+
+    Returns
+    -------
+    dict
+        Keys ``sky_map``, ``eigenvectors``, ``inv_eigenvalues``,
+        ``unobserved``.
+    """
+    lam, V = np.linalg.eigh(AtA)
+    lam_thresh = rcond**2 * lam[-1]
+    safe = lam > lam_thresh
+    inv_lam = np.where(safe, 1.0 / np.where(safe, lam, 1.0), 0.0)
+    x_est = V @ (inv_lam * (V.T @ Aty))
+
+    sky_map = x_est[:npix].copy()
+    col_norms_sq = np.diag(AtA)[:npix]
+    unobserved = col_norms_sq < (1e-6**2) * col_norms_sq.max()
+    sky_map[unobserved] = np.nan
+
+    return {
+        "sky_map": sky_map,
+        "eigenvectors": V,
+        "inv_eigenvalues": inv_lam,
+        "unobserved": unobserved,
+    }

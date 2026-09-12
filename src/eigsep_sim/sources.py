@@ -2,7 +2,7 @@
 
 Companion to :mod:`ephemeris` (real Sun/Earth geometry) and the
 ``ext_source_dirs_gal``/``ext_source_temps`` hooks on
-:class:`eigsep_sim.simulate.ForwardModel` (beam-weighted, occultation-gated
+:class:`eigsep_sim.forward_model.ForwardModel` (beam-weighted, occultation-gated
 point-source injection).  This module supplies the *brightness* half:
 what temperature to inject once a source's direction and visibility are
 known.
@@ -63,6 +63,8 @@ from __future__ import annotations
 import numpy as np
 from astropy.time import Time
 import astropy.units as u
+
+from eigsep_base.const import c, k_B, eta_0, pi
 
 _ANCHOR_FREQS_HZ = np.array([50e6, 150e6])
 _ANCHOR_TEMPS_K = np.array([1.5e6, 6e5])
@@ -337,3 +339,252 @@ def earth_rfi_tone_temperature_K(
     for tf in tones:
         T[np.abs(f - tf) <= tone_width_hz] = tone_temp_K
     return T
+
+
+def k_to_v_per_m_root_hz(temp_k, freq_hz):
+    """Brightness temperature [K] -> spectral field strength [V/m/sqrt(Hz)].
+
+    Rayleigh-Jeans: radiance ``2 k_B T / lambda**2``, integrated over a full
+    sphere (``4 pi``) and converted to field strength through the impedance
+    of free space.
+
+    Parameters
+    ----------
+    temp_k : float or array_like
+        Brightness temperature [K].
+    freq_hz : float or array_like
+        Frequency [Hz].
+
+    Returns
+    -------
+    float or ndarray
+        Field strength [V / m / sqrt(Hz)].
+    """
+    lam = c / freq_hz
+    radiance = 2 * k_B * temp_k / lam**2
+    flux_density = 4 * pi * radiance
+    return np.sqrt(flux_density * eta_0)
+
+
+# ---------------------------------------------------------------------------
+# Systematic injection (absorbed from bloom21cm/src/systematics.py)
+#
+# These operate on the array layout used by the linear simulators:
+#   masks   (nobs, npix)          -- 1 where a pixel is visible
+#   beams   (nobs, ndipole, npix)
+#   omega_B (nobs, ndipole)       -- full-sphere beam solid angle
+#
+# Truth injection is deliberately kept separate from the recovery design
+# columns, so a study can stress-test a mismatched model instead of fitting
+# back exactly what was injected.
+# ---------------------------------------------------------------------------
+
+
+def normalized_beam_weights(beams, omega_B):
+    """Return beam weights normalised by full-sphere beam solid angle."""
+    beams = np.asarray(beams, dtype=float)
+    omega_B = np.asarray(omega_B, dtype=float)
+    if beams.ndim != 3:
+        raise ValueError("beams must have shape (nobs, ndipole, npix)")
+    if omega_B.shape != beams.shape[:2]:
+        raise ValueError(
+            f"omega_B must have shape {beams.shape[:2]}, got {omega_B.shape}"
+        )
+    return beams / omega_B[:, :, None]
+
+
+def _expand_time_pixels(pixel_index, nobs, n_source_times=None):
+    pix = np.asarray(pixel_index, dtype=int)
+    if pix.ndim == 0:
+        return np.full(nobs, int(pix), dtype=int)
+    if pix.shape == (nobs,):
+        return pix
+    if n_source_times is not None and pix.shape == (n_source_times,):
+        return pix[np.arange(nobs) % n_source_times]
+    raise ValueError(
+        "pixel_index must be scalar, length nobs, or length n_source_times"
+    )
+
+
+def point_source_coupling(
+    masks, beams, omega_B, pixel_index, n_source_times=None
+):
+    """Beam/visibility coupling for a point source at one pixel per time.
+
+    Returns an array with shape ``(nobs, ndipole)``.  This is the
+    design-column coefficient for a source brightness at a single frequency.
+    """
+    masks = np.asarray(masks, dtype=float)
+    weights = normalized_beam_weights(beams, omega_B)
+    nobs, ndipole, npix = weights.shape
+    if masks.shape != (nobs, npix):
+        raise ValueError(
+            f"masks must have shape {(nobs, npix)}, got {masks.shape}"
+        )
+    pix = _expand_time_pixels(pixel_index, nobs, n_source_times=n_source_times)
+    if np.any((pix < 0) | (pix >= npix)):
+        raise ValueError("pixel_index contains pixels outside the map")
+    t_idx = np.arange(nobs)
+    d_idx = np.arange(ndipole)
+    return (
+        weights[t_idx[:, None], d_idx[None, :], pix[:, None]]
+        * masks[t_idx, pix][:, None]
+    )
+
+
+def point_source_signal(
+    masks, beams, omega_B, pixel_index, temperature_K, n_source_times=None
+):
+    """Antenna-temperature contribution of a point source.
+
+    ``temperature_K`` may be scalar, ``(nfreq,)``,
+    ``(n_source_times, nfreq)``, or ``(nobs, nfreq)``.  The result has shape
+    ``(nobs, ndipole, nfreq)``.
+    """
+    coupling = point_source_coupling(
+        masks, beams, omega_B, pixel_index, n_source_times=n_source_times
+    )
+    nobs = coupling.shape[0]
+    temp = np.asarray(temperature_K, dtype=float)
+    if temp.ndim == 0:
+        temp = temp[None, None]
+    elif temp.ndim == 1:
+        temp = temp[None, :]
+    elif temp.ndim != 2:
+        raise ValueError("temperature_K must be scalar, 1-D, or 2-D")
+    if temp.shape[0] == 1:
+        temp_obs = np.broadcast_to(temp, (nobs, temp.shape[1]))
+    elif temp.shape[0] == nobs:
+        temp_obs = temp
+    elif n_source_times is not None and temp.shape[0] == n_source_times:
+        temp_obs = temp[np.arange(nobs) % n_source_times]
+    else:
+        raise ValueError("temperature_K time axis is incompatible with masks")
+    return coupling[:, :, None] * temp_obs[:, None, :]
+
+
+def extended_source_coupling(masks, beams, omega_B, source_weights):
+    """Coupling for an extended source given fractional pixel weights.
+
+    ``source_weights`` has shape ``(nobs, npix)`` and is usually zero except
+    over pixels covered by the source disc.  Visibility masking is applied
+    here.
+    """
+    masks = np.asarray(masks, dtype=float)
+    source_weights = np.asarray(source_weights, dtype=float)
+    weights = normalized_beam_weights(beams, omega_B)
+    if source_weights.shape != masks.shape:
+        raise ValueError(
+            f"source_weights must have shape {masks.shape}, "
+            f"got {source_weights.shape}"
+        )
+    return np.sum(
+        weights * masks[:, None, :] * source_weights[:, None, :], axis=2
+    )
+
+
+def extended_source_signal(
+    masks, beams, omega_B, source_weights, temperature_K
+):
+    """Antenna-temperature contribution of an extended source."""
+    coupling = extended_source_coupling(masks, beams, omega_B, source_weights)
+    nobs = coupling.shape[0]
+    temp = np.asarray(temperature_K, dtype=float)
+    if temp.ndim == 0:
+        temp = temp[None, None]
+    elif temp.ndim == 1:
+        temp = temp[None, :]
+    elif temp.ndim != 2:
+        raise ValueError("temperature_K must be scalar, 1-D, or 2-D")
+    if temp.shape[0] == 1:
+        temp = np.broadcast_to(temp, (nobs, temp.shape[1]))
+    elif temp.shape[0] != nobs:
+        raise ValueError("temperature_K time axis must be length 1 or nobs")
+    return coupling[:, :, None] * temp[:, None, :]
+
+
+def surface_emission_signal(masks, beams, omega_B, surface_temperature_K):
+    """Blocked-surface antenna contribution from a nonuniform temp map.
+
+    ``surface_temperature_K`` may be ``(npix,)`` or ``(npix, nfreq)``.  This
+    is the full blocked-surface term, not just a residual against a scalar
+    model.
+    """
+    masks = np.asarray(masks, dtype=float)
+    weights = normalized_beam_weights(beams, omega_B)
+    surface = np.asarray(surface_temperature_K, dtype=float)
+    if surface.ndim == 1:
+        if surface.shape[0] != masks.shape[1]:
+            raise ValueError(
+                "surface_temperature_K pixel axis does not match masks"
+            )
+        surface = surface[:, None]
+    elif surface.ndim != 2 or surface.shape[0] != masks.shape[1]:
+        raise ValueError(
+            "surface_temperature_K must have shape (npix,) or (npix, nfreq)"
+        )
+    return np.einsum("tdp,tp,pf->tdf", weights, 1.0 - masks, surface)
+
+
+def surface_residual_signal(
+    masks, beams, omega_B, surface_temperature_K, scalar_model_K
+):
+    """Residual blocked-surface term after subtracting a scalar model."""
+    surface = np.asarray(surface_temperature_K, dtype=float)
+    return surface_emission_signal(
+        masks, beams, omega_B, surface - scalar_model_K
+    )
+
+
+def synthetic_lunar_temperature_map(
+    nside, base_K=300.0, dipole_K=20.0, quadrupole_K=5.0
+):
+    """Small deterministic Moon-fixed-like HEALPix temperature stress map."""
+    import healpy
+
+    npix = healpy.nside2npix(nside)
+    xyz = np.asarray(healpy.pix2vec(nside, np.arange(npix)))
+    z = xyz[2]
+    return base_K + dipole_K * z + quadrupole_K * (1.5 * z**2 - 0.5)
+
+
+def earth_rfi_signal(
+    masks,
+    beams,
+    omega_B,
+    earth_pixels,
+    freqs_hz,
+    *,
+    tone_freqs_hz=None,
+    **kwargs,
+):
+    """Occultation-gated Earth RFI contribution.
+
+    Uses :func:`earth_rfi_temperature_K` for the flat in-band model, or
+    :func:`earth_rfi_tone_temperature_K` when ``tone_freqs_hz`` is given.
+    """
+    if tone_freqs_hz is None:
+        temp = earth_rfi_temperature_K(freqs_hz, **kwargs)
+    else:
+        temp = earth_rfi_tone_temperature_K(freqs_hz, tone_freqs_hz, **kwargs)
+    n_source_times = len(np.atleast_1d(earth_pixels))
+    return point_source_signal(
+        masks,
+        beams,
+        omega_B,
+        earth_pixels,
+        temp,
+        n_source_times=n_source_times,
+    )
+
+
+def quiet_sun_signal(
+    masks, beams, omega_B, sun_pixels, freqs_hz, times, activity_kwargs=None
+):
+    """Occultation-gated quiet/slowly-variable Sun contribution."""
+    temp = sun_temperature_K(
+        freqs_hz, times, activity_kwargs=activity_kwargs
+    )
+    return point_source_signal(
+        masks, beams, omega_B, sun_pixels, temp, n_source_times=len(temp)
+    )

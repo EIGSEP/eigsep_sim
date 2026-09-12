@@ -1,10 +1,10 @@
 """
-Tests for eigsep_sim.coord — rot_m and coordinate helpers.
+Tests for healjax.coord (formerly eigsep_sim.coord) — rot_m and coordinate helpers.
 """
 
 import numpy as np
 import pytest
-from eigsep_sim.coord import rot_m, xyz2thphi, thphi2xyz, azalt2top, top2azalt
+from healjax.coord import rot_m, xyz2thphi, thphi2xyz, azalt2top, top2azalt
 
 
 # ---------------------------------------------------------------------------

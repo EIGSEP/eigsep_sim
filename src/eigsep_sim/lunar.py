@@ -18,7 +18,7 @@ from scipy.spatial.transform import Rotation, Slerp
 from .beam import Beam
 from .models import T21cmModel
 from .observer import LunarOrbit
-from .simulate import ForwardModel
+from .forward_model import ForwardModel
 from .sky import Sky
 
 

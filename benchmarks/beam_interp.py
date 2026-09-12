@@ -34,7 +34,8 @@ import numpy as np
 from scipy.spatial.transform import Rotation
 
 # Must be imported before JIT-compiled helpers so healjax is initialised.
-from eigsep_sim.healpix import float_dtype, interpolate_map
+from healjax import FLOAT_TYPE as float_dtype
+from healjax.interp import interpolate_map
 from eigsep_sim.beam import short_dipole_beam
 
 # ---------------------------------------------------------------------------

@@ -18,7 +18,7 @@ import astropy.units as u
 from eigsep_sim.beam import Beam
 from eigsep_sim.sky import Sky
 from eigsep_sim.observer import LunarOrbit
-from eigsep_sim.simulate import ForwardModel
+from eigsep_sim.forward_model import ForwardModel
 from eigsep_sim.regolith import (
     subsolar_equilibrium_temperature_K,
     surface_equilibrium_temperature_K,

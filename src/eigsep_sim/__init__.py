@@ -1,7 +1,10 @@
 __author__ = "Aaron Parsons"
 __version__ = "0.0.1"
 
-from .const import DTYPE_R_NPY, DTYPE_R_JAX
+# Import first: enables JAX 64-bit mode before any JAX array is created.
+from ._jax_const import DTYPE_R_JAX
+from eigsep_base.const import DTYPE_R_NPY
+
 from .basis import BeamBasis, SkyBasis
 from .beam import (
     Beam,
@@ -30,6 +33,13 @@ from .ephemeris import (
     body_angular_radius,
     body_occulted_by_moon,
     moon_surface_intersection_mcmf,
+    body_direction_from_moon_gal,
+    moon_limb_cos_angle,
+    earth_illuminated_fraction,
+    occulted_by_moon,
+    moon_surface_distance,
+    moon_reflect_vector,
+    sample_disk,
 )
 from .sources import (
     quiet_sun_temperature_K,
@@ -39,6 +49,26 @@ from .sources import (
     flag_bursts,
     earth_rfi_temperature_K,
     earth_rfi_tone_temperature_K,
+    k_to_v_per_m_root_hz,
+    normalized_beam_weights,
+    point_source_coupling,
+    point_source_signal,
+    extended_source_coupling,
+    extended_source_signal,
+    surface_emission_signal,
+    surface_residual_signal,
+    synthetic_lunar_temperature_map,
+    earth_rfi_signal,
+    quiet_sun_signal,
+)
+from .reflectivity import (
+    TERRAIN_TYPES,
+    conductivity_from_resistivity,
+    complex_permittivity,
+    complex_ref_index,
+    reflection_coefficient,
+    eps_r_from_gpr,
+    terrain_reflection_coefficient,
 )
 from .regolith import (
     subsolar_equilibrium_temperature_K,
@@ -52,7 +82,7 @@ from .regolith import (
     lambertian_hemisphere_weights,
 )
 from .sky import Sky
-from .simulate import ForwardModel, StackedForwardModel
+from .forward_model import ForwardModel, StackedForwardModel
 from .calibrator import Calibrator
 from .lunar import (
     LunarCampaign,
@@ -87,6 +117,9 @@ from .recovery import (
     normal_solve,
     relative_rms,
     sample_beam_weights,
+    build_normal_equations,
+    build_A_right_product,
+    normal_solve_equations,
 )
 
 __all__ = [
@@ -114,6 +147,13 @@ __all__ = [
     "body_angular_radius",
     "body_occulted_by_moon",
     "moon_surface_intersection_mcmf",
+    "body_direction_from_moon_gal",
+    "moon_limb_cos_angle",
+    "earth_illuminated_fraction",
+    "occulted_by_moon",
+    "moon_surface_distance",
+    "moon_reflect_vector",
+    "sample_disk",
     "quiet_sun_temperature_K",
     "solar_activity_envelope",
     "sun_temperature_K",
@@ -121,6 +161,24 @@ __all__ = [
     "flag_bursts",
     "earth_rfi_temperature_K",
     "earth_rfi_tone_temperature_K",
+    "k_to_v_per_m_root_hz",
+    "normalized_beam_weights",
+    "point_source_coupling",
+    "point_source_signal",
+    "extended_source_coupling",
+    "extended_source_signal",
+    "surface_emission_signal",
+    "surface_residual_signal",
+    "synthetic_lunar_temperature_map",
+    "earth_rfi_signal",
+    "quiet_sun_signal",
+    "TERRAIN_TYPES",
+    "conductivity_from_resistivity",
+    "complex_permittivity",
+    "complex_ref_index",
+    "reflection_coefficient",
+    "eps_r_from_gpr",
+    "terrain_reflection_coefficient",
     "subsolar_equilibrium_temperature_K",
     "surface_equilibrium_temperature_K",
     "solar_geometry",
@@ -157,6 +215,9 @@ __all__ = [
     "normal_solve",
     "relative_rms",
     "sample_beam_weights",
+    "build_normal_equations",
+    "build_A_right_product",
+    "normal_solve_equations",
     "crossed_rod_inertia",
     "integrate_torque_free",
     "interpolate_body_rotations",
