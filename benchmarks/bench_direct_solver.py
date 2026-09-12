@@ -14,7 +14,7 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 
-from eigsep_sim.const import DTYPE_R_NPY
+from eigsep_base.const import DTYPE_R_NPY
 
 from bench_fastcg_profile import build
 

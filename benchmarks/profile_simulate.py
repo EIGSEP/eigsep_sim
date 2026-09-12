@@ -113,7 +113,7 @@ print("=" * 70)
 if LineProfiler is None:
     print("  line_profiler is not installed; skipping this section.\n")
 else:
-    from eigsep_sim.simulate import ForwardModel as _FwdCls
+    from eigsep_sim.forward_model import ForwardModel as _FwdCls
 
     lp = LineProfiler()
     lp.add_function(_FwdCls.precompute_geometry)

@@ -16,7 +16,7 @@ from eigsep_sim import (
     LunarOrbit, body_directions_gal, body_occulted_by_moon,
     moon_surface_intersection_mcmf,
 )
-from eigsep_sim.const import R_MOON
+from eigsep_base.const import R_MOON
 
 
 def test_distances_are_physically_reasonable():

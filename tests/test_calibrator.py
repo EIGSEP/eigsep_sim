@@ -6,7 +6,7 @@ import pytest
 from astropy.time import Time
 
 from eigsep_sim.calibrator import AndersonAccelerator, Calibrator
-from eigsep_sim.simulate import ForwardModel
+from eigsep_sim.forward_model import ForwardModel
 from eigsep_sim.beam import Beam
 from eigsep_sim.sky import Sky
 from eigsep_sim.observer import EarthSurface
