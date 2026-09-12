@@ -60,11 +60,8 @@ Repository = "https://github.com/EIGSEP/eigsep_sim"
 [tool.setuptools.package-data]
 eigsep_sim = ["data/*.npz"]
 
-[tool.setuptools.package-dir]
-eigsep_sim = "src"
-
-[tool.setuptools]
-packages = ["eigsep_sim"]
+[tool.setuptools.packages.find]
+where = ["src"]
 
 [tool.setuptools.dynamic]
 version = {attr = "eigsep_sim.__version__"}
