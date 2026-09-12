@@ -8,8 +8,9 @@ Provides:
 import numpy as np
 import healpy
 
+from eigsep_base.const import DTYPE_R_NPY
+
 from .basis import SkyBasis
-from .const import DTYPE_R_NPY
 
 
 class Sky:

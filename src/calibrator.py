@@ -19,8 +19,10 @@ import jax
 import jax.numpy as jnp
 from typing import Optional, Dict
 
-from .const import DTYPE_R_NPY, DTYPE_R_JAX
-from .simulate import ForwardModel
+from eigsep_base.const import DTYPE_R_NPY
+
+from ._jax_const import DTYPE_R_JAX
+from .forward_model import ForwardModel
 
 _BEAM_HARMONIC_Q_CACHE = {}
 

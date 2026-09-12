@@ -1,7 +1,10 @@
 __author__ = "Aaron Parsons"
 __version__ = "0.0.1"
 
-from .const import DTYPE_R_NPY, DTYPE_R_JAX
+# Import first: enables JAX 64-bit mode before any JAX array is created.
+from ._jax_const import DTYPE_R_JAX
+from eigsep_base.const import DTYPE_R_NPY
+
 from .basis import BeamBasis, SkyBasis
 from .beam import (
     Beam,
@@ -52,7 +55,7 @@ from .regolith import (
     lambertian_hemisphere_weights,
 )
 from .sky import Sky
-from .simulate import ForwardModel, StackedForwardModel
+from .forward_model import ForwardModel, StackedForwardModel
 from .calibrator import Calibrator
 from .lunar import (
     LunarCampaign,

@@ -2,7 +2,7 @@
 
 Companion to :mod:`ephemeris` (real Sun/Earth geometry) and the
 ``ext_source_dirs_gal``/``ext_source_temps`` hooks on
-:class:`eigsep_sim.simulate.ForwardModel` (beam-weighted, occultation-gated
+:class:`eigsep_sim.forward_model.ForwardModel` (beam-weighted, occultation-gated
 point-source injection).  This module supplies the *brightness* half:
 what temperature to inject once a source's direction and visibility are
 known.

@@ -30,8 +30,9 @@ from astropy.time import Time
 from astropy.coordinates import get_body_barycentric
 import astropy.units as u
 
+from eigsep_base.const import R_MOON, R_SUN, R_EARTH
+
 from .observer import ICRS2GAL, _moon_icrs2mcmf
-from .const import R_MOON, R_SUN, R_EARTH
 
 _BODY_RADII_M = {"sun": R_SUN, "earth": R_EARTH}
 

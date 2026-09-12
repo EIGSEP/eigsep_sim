@@ -28,7 +28,9 @@ import jax
 import jax.numpy as jnp
 import healpy
 
-from .const import DTYPE_R_JAX, DTYPE_R_NPY
+from eigsep_base.const import DTYPE_R_NPY
+
+from ._jax_const import DTYPE_R_JAX
 from .beam import (
     dipole_beam_maps_jax,
     dipole_axes_from_angles,
