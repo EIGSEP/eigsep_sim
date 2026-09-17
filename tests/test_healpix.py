@@ -1,11 +1,11 @@
 """
-Tests for eigsep_sim.healpix — add2array, HealpixBase, HealpixMap, HPM.
+Tests for healjax.maps (formerly eigsep_sim.healpix) — add2array, HealpixBase, HealpixMap, HPM.
 """
 
 import numpy as np
 import pytest
 import healpy
-from eigsep_sim.healpix import add2array, HealpixBase, HealpixMap, HPM
+from healjax.maps import add2array, HealpixBase, HealpixMap, HPM
 
 
 # ---------------------------------------------------------------------------

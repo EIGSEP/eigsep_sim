@@ -11,7 +11,7 @@ from astropy.time import Time
 import astropy.units as u
 
 from eigsep_sim.observer import CircularLunarOrbit, EphemerisLunarOrbit
-from eigsep_sim.const import R_MOON
+from eigsep_base.const import R_MOON
 
 
 def _synthetic_circular_ephemeris(altitude=100e3, n=400, t0=None):

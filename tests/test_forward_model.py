@@ -13,7 +13,7 @@ import pytest
 import healpy
 from astropy.time import Time
 
-from eigsep_sim.simulate import ForwardModel
+from eigsep_sim.forward_model import ForwardModel
 from eigsep_sim.basis import BeamBasis, SkyBasis
 from eigsep_sim.beam import Beam
 from eigsep_sim.sky import Sky

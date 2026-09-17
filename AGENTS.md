@@ -59,3 +59,11 @@ Avoid unrelated refactors and do not regenerate notebooks unless requested.
 Treat API clarity and JAX performance as first-class review criteria. Do not
 modify packaged `.npz` data without explaining provenance and expected
 downstream effects.
+
+## Human-control precedence
+
+The controlling agent workspace's human-control and review protocol remains in
+force for all work in this directory. These repository guidelines refine the
+work but do not authorize delegation, scaling, follow-on work, or proceeding
+past a review gate. Analytical milestones require an executed notebook and
+rendered HTML for Aaron's inspection before more ambitious work begins.

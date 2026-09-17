@@ -21,7 +21,9 @@ import numpy as np
 import jax.numpy as jnp
 from scipy.interpolate import interp1d
 
-from .const import c as C_LIGHT, DTYPE_R_NPY, DTYPE_R_JAX
+from eigsep_base.const import c as C_LIGHT, DTYPE_R_NPY
+
+from ._jax_const import DTYPE_R_JAX
 
 BEAM_NPZ = os.path.join(os.path.dirname(__file__), "data", "eigsep_bowtie_v000.npz")
 

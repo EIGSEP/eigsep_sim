@@ -17,8 +17,8 @@ from scipy.spatial.transform import Rotation
 from scipy.integrate import solve_ivp
 from scipy.interpolate import CubicSpline
 
-from .coord import rot_m
-from .const import R_MOON, GM_MOON
+from eigsep_base.const import R_MOON, GM_MOON
+from healjax.coord import rot_m
 
 
 def _icrs2gal_matrix():

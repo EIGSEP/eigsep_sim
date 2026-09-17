@@ -20,7 +20,7 @@ from eigsep_sim.observer import (
     Observer, EarthSurface, LunarSurface, LunarOrbit,
     circular_orbital_period, ICRS2GAL, _moon_icrs2mcmf
 )
-from eigsep_sim.const import R_MOON, GM_MOON
+from eigsep_base.const import R_MOON, GM_MOON
 
 
 def test_observer_abstract():
