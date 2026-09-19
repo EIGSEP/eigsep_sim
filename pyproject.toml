@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "eigsep_sim"
 dynamic = ["version"]
-requires-python = ">=3.8"
+requires-python = ">=3.11"
 authors = [
     {name = "Aaron Parsons", email = "aparsons@berkeley.edu"},
 ]
@@ -47,6 +47,7 @@ vis = [
     "matplotlib",
 ]
 dev = [
+    "pygdsm",
     "pytest",
     "pytest-cov",
     "black",

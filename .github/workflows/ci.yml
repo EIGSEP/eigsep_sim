@@ -1,0 +1,36 @@
+name: Build and test Python package
+
+on: [push, pull_request]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
+
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v8.3.2
+        with:
+          enable-cache: true
+          cache-dependency-glob: "pyproject.toml"
+          python-version: ${{ matrix.python-version }}
+      # pygdsm downloads the ~300 MB GSM2016 component file into the astropy
+      # cache on first use; keep it between runs.
+      - name: Cache GSM data
+        uses: actions/cache@v4
+        with:
+          path: ~/.astropy/cache
+          key: astropy-cache-gsm2016-v1
+      # eigsep_base and healjax are not on PyPI; install them from GitHub.
+      - name: Install
+        run: |
+          uv venv
+          uv pip install \
+            "eigsep_base @ git+https://github.com/EIGSEP/eigsep_base" \
+            "healjax @ git+https://github.com/EIGSEP/healjax" \
+            ".[dev]"
+      - name: Test with pytest
+        run: .venv/bin/python -m pytest tests
