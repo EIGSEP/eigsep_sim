@@ -1148,3 +1148,18 @@ if __name__ == "__main__":
     test_forward_model_simulate_no_times_no_geom_error()
     test_forward_model_different_nside_beam_sky()
     print("\n✓ All Phase 6 (simulate.py) tests passed!")
+
+
+def test_top2body_is_the_eigsep_base_roll_mount():
+    """Beam.top2body is the transpose of eigsep_base.rotations.mount_rotation (a roll mount)."""
+    from eigsep_base.rotations import mount_rotation
+
+    from eigsep_sim.beam import Beam as _Beam
+
+    psi = np.radians(142.164)
+    for az, alt in ((0.0, 0.0), (0.7, 0.3), (-2.0, np.pi / 2), (1.1, 2.9)):
+        expected = mount_rotation(np.degrees(az), np.degrees(alt), np.degrees(psi)).T
+        np.testing.assert_allclose(_Beam.top2body(az, alt, psi), expected, atol=1e-6)
+    # Rolling never moves the boresight: body +z maps to the same ENU direction for every az.
+    boresights = [_Beam.top2body(az, 0.8, psi).T @ [0, 0, 1] for az in np.linspace(0, 2 * np.pi, 7)]
+    np.testing.assert_allclose(boresights, np.broadcast_to(boresights[0], (7, 3)), atol=1e-6)

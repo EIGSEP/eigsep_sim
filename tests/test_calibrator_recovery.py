@@ -20,6 +20,9 @@ import pytest
 from astropy.time import Time
 
 from eigsep_sim import Beam, Sky, ForwardModel, NullTerrain, Calibrator
+
+# Elevation-axle direction (the Marjum 2026-07 highline), rad ccw from East.
+PSI_MARJUM = np.radians(142.164)
 from eigsep_sim.observer import EarthSurface
 
 
@@ -42,14 +45,18 @@ def build_recovery_problem(noise_snr=1e4, beam_perturb="scatter"):
     sky_coeffs = sky.init_coeffs()
     beam_coeffs = beam.coeffs.copy()
 
-    # A few sidereal times x a few beam orientations (az/alt scan).
+    # A few sidereal times x a few beam orientations. On the roll mount, az only
+    # spins the antenna about its boresight, so sky coverage comes from tilting:
+    # tilts to both sides of the axle, as the real el sweeps do. (A single tilt
+    # with six rolls, the old alt-az-era pattern, leaves the beam too weakly
+    # constrained and the solver drifts along a degeneracy.)
     times = [Time("2025-01-01") + i * 0.25 for i in range(6)]
     base_rots = observer.rot_gal2top_stack(times)
     orient_rots = np.stack(
         [
-            Beam.top2body(az, alt)
-            for alt in (0.0, 0.8)
-            for az in np.linspace(0, 2 * np.pi, 6, endpoint=False)
+            Beam.top2body(az, alt, PSI_MARJUM)
+            for alt in (0.0, 0.8, -0.8)
+            for az in np.linspace(0, 2 * np.pi, 4, endpoint=False)
         ]
     )
     n_orient = orient_rots.shape[0]
@@ -357,7 +364,7 @@ def test_direct_sky_solve_with_terrain_masking():
     base = obs.rot_gal2top_stack(times)
     orient = np.stack(
         [
-            Beam.top2body(a, h)
+            Beam.top2body(a, h, PSI_MARJUM)
             for h in (0.0, 0.8)
             for a in np.linspace(0, 2 * np.pi, 6, endpoint=False)
         ]
