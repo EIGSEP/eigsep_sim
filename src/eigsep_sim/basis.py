@@ -9,10 +9,10 @@ Basis matrices can be saved/loaded as npz files and support resampling to new fr
 
 import numpy as np
 import healpy
-from scipy.interpolate import interp1d
 from abc import ABC, abstractmethod
 
 from eigsep_base.const import DTYPE_R_NPY
+from eigsep_base.spectral_basis import SpectralBasis
 
 try:
     import pygdsm
@@ -21,12 +21,14 @@ except ImportError:
     HAS_GSM = False
 
 
-class _SpectralBasis(ABC):
+class _SpectralBasis(SpectralBasis, ABC):
     """Abstract base class for spectral basis decomposition.
 
-    Stores a canonical projection matrix A of shape (nfreq, nmodes) and optional
-    SVD metadata for reconstruction. The basis enables projection and deprojection
-    of spatial data to/from spectral coefficient space.
+    Built on :class:`eigsep_base.spectral_basis.SpectralBasis` (the frequency
+    basis shared with eigsep_data's beam mapping), which supplies projection,
+    deprojection and resampling. This class adds eigsep_sim's conventions:
+    float32 ``A``, frequencies in Hz as ``freqs_hz``, the centred-SVD
+    metadata below, and its npz keys.
 
     Parameters
     ----------
@@ -47,60 +49,30 @@ class _SpectralBasis(ABC):
 
     def __init__(self, A, freqs_hz=None, svd_mean=None, svd_modes=None,
                  svd_svals=None, n_samples=None):
-        self.A = np.asarray(A, dtype=DTYPE_R_NPY)
-        if self.A.ndim != 2:
-            raise ValueError(f"A must be 2-D, got shape {self.A.shape}")
-        self.freqs_hz = np.asarray(freqs_hz, dtype=np.float64) if freqs_hz is not None else None
+        super().__init__(
+            np.asarray(A, dtype=DTYPE_R_NPY),
+            freqs=freqs_hz,
+            singular_values=np.asarray(svd_svals, dtype=DTYPE_R_NPY) if svd_svals is not None else None,
+        )
         self.svd_mean = np.asarray(svd_mean, dtype=DTYPE_R_NPY) if svd_mean is not None else None
         self.svd_modes = np.asarray(svd_modes, dtype=DTYPE_R_NPY) if svd_modes is not None else None
-        self.svd_svals = np.asarray(svd_svals, dtype=DTYPE_R_NPY) if svd_svals is not None else None
         self.n_samples = n_samples
 
     @property
-    def nfreq(self):
-        """Number of frequencies."""
-        return self.A.shape[0]
+    def freqs_hz(self):
+        """Frequencies [Hz] at which the basis is defined (``freqs`` of the base class)."""
+        return self.freqs
 
     @property
-    def nmodes(self):
-        """Number of basis modes."""
-        return self.A.shape[1]
+    def svd_svals(self):
+        """Singular values (``singular_values`` of the base class)."""
+        return self.singular_values
 
     @property
     def has_svd(self):
         """True if all SVD metadata is present."""
         return (self.svd_mean is not None and self.svd_modes is not None and
                 self.svd_svals is not None and self.n_samples is not None)
-
-    def project(self, data):
-        """Project spatial data onto spectral basis.
-
-        Parameters
-        ----------
-        data : ndarray, shape (..., nfreq)
-            Spatial data (trailing axis is frequency).
-
-        Returns
-        -------
-        ndarray, shape (..., nmodes)
-            Basis coefficients.
-        """
-        return np.matmul(data, self.A)
-
-    def deproject(self, coeffs):
-        """Reconstruct frequency-dependent data from basis coefficients.
-
-        Parameters
-        ----------
-        coeffs : ndarray, shape (..., nmodes)
-            Basis coefficients.
-
-        Returns
-        -------
-        ndarray, shape (..., nfreq)
-            Reconstructed spatial data.
-        """
-        return np.matmul(coeffs, self.A.T)
 
     def save(self, path):
         """Save basis to npz file.
@@ -419,10 +391,5 @@ def _resample_basis(old_freqs, A_old, new_freqs):
     ndarray, shape (nfreq_new, nmodes)
         Resampled basis matrix.
     """
-    nmodes = A_old.shape[1]
-    A_new = np.zeros((len(new_freqs), nmodes), dtype=DTYPE_R_NPY)
-    for m in range(nmodes):
-        interp = interp1d(old_freqs, A_old[:, m], kind='linear',
-                         bounds_error=False, fill_value=0.0)
-        A_new[:, m] = interp(new_freqs)
-    return A_new
+    basis = SpectralBasis(np.asarray(A_old), freqs=old_freqs)
+    return basis.evaluate(new_freqs, fill_value=0.0).astype(DTYPE_R_NPY)

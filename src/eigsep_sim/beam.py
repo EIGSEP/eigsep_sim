@@ -916,26 +916,39 @@ class Beam:
         return np.array([[c, -s, 0], [s, c, 0], [0, 0, 1]], dtype=DTYPE_R_NPY)
 
     @staticmethod
-    def top2body(az, alt):
-        """Rotation matrix from topocentric to antenna body frame.
+    def top2body(az, alt, psi):
+        """Rotation matrix from topocentric (ENU) to the antenna body frame.
 
-        Implements the EIGSEP scanning convention: azimuth rotates around the
-        topocentric ẑ axis, altitude tilts around the topocentric x̂ (east) axis.
-        At az=alt=0 the body frame coincides with the topocentric frame
-        (x = east, y = north, z = up).
+        Implements the EIGSEP mount, :func:`eigsep_base.rotations.mount_rotation`:
+        a roll mount. The azimuth stage turns the antenna about its own
+        boresight, and the elevation axle, pointing ``psi`` counter-clockwise
+        from East, then tips it:
 
-            R_body2top = R_z(az) @ R_x(alt)
-            R_top2body = R_x(−alt) @ R_z(−az)
+            R_body2top = R_z(psi) @ R_x(alt) @ R_z(az)
+            R_top2body = R_body2top.T
+
+        alt = 0 points the boresight (body +z) at zenith, whatever az is; az
+        only rolls the pattern about the boresight. At az = alt = psi = 0 the body
+        frame coincides with ENU (x = east, y = north, z = up). For Marjum
+        2026-07 the axle is the highline, psi = radians(142.164).
+
+        Changed 2026-09-25: this was ``R_z(az) @ R_x(alt)`` (tilt, then turn
+        about the vertical, an alt-az mount), which the Marjum transmitter
+        raster rules out.
 
         Parameters
         ----------
         az : float
-            Azimuth [rad].
+            Roll about the boresight [rad].
         alt : float
-            Altitude tilt [rad].
+            Tilt about the axle [rad]; 0 = zenith.
+        psi : float
+            Axle direction, counter-clockwise from East [rad]. A site constant; no default.
 
         Returns
         -------
         ndarray, shape (3, 3), float32
         """
-        return Beam.rot_x(-alt) @ Beam.rot_z(-az)
+        from eigsep_base.rotations import mount_rotation
+        R = mount_rotation(np.degrees(az), np.degrees(alt), np.degrees(psi))
+        return np.swapaxes(R, -1, -2).astype(DTYPE_R_NPY)
