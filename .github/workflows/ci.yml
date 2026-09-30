@@ -24,13 +24,12 @@ jobs:
         with:
           path: ~/.astropy/cache
           key: astropy-cache-gsm2016-v1
-      # eigsep_base and healjax are not on PyPI; install them from GitHub.
+      # eigsep_base is not on PyPI; install it from GitHub.
       - name: Install
         run: |
           uv venv
           uv pip install \
             "eigsep_base @ git+https://github.com/EIGSEP/eigsep_base" \
-            "healjax @ git+https://github.com/EIGSEP/healjax" \
             ".[dev]"
       - name: Test with pytest
         run: .venv/bin/python -m pytest tests
