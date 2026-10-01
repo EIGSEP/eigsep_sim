@@ -433,7 +433,8 @@ def _as_column_array(value, ncol, default):
     return np.broadcast_to(np.asarray(value, dtype=float), (ncol,))
 
 
-def solve(A, y, noise_sigma, prior_sigma=None, prior_mean=None, rcond=1e-12):
+def solve(A, y, noise_sigma, prior_sigma=None, prior_mean=None, rcond=1e-12,
+          null_tol=1e-3):
     """Gaussian-prior (MAP) least-squares solve at one frequency.
 
     Minimizes ``|(y - A x) / noise_sigma|^2 + |(x - prior_mean) / prior_sigma|^2``.
@@ -452,6 +453,12 @@ def solve(A, y, noise_sigma, prior_sigma=None, prior_mean=None, rcond=1e-12):
     y : ndarray, shape (ntime,)
     noise_sigma : float or ndarray, shape (ntime,)
     prior_sigma, prior_mean : float or ndarray, shape (ncol,), optional
+    rcond : float
+        Eigenvalue cutoff of the unit-diagonal precision, relative to its
+        largest eigenvalue.
+    null_tol : float
+        A column is unconstrained if any unit-norm null vector of the
+        unit-diagonal precision has a component above this on it.
 
     Returns
     -------
@@ -475,9 +482,12 @@ def solve(A, y, noise_sigma, prior_sigma=None, prior_mean=None, rcond=1e-12):
     inv = np.where(keep, 1.0 / np.where(keep, lam, 1.0), 0.0)
     cov = (d[:, None] * V * inv) @ (V.T * d[None, :])
 
+    # Null vectors are unit-norm in the scaled space; a column that really
+    # moves along one has a component of order 0.1-1, while eigenvector
+    # mixing among near-degenerate directions leaves ~1e-5 elsewhere.
     null_scaled = np.concatenate(
         [V[:, ~keep], np.eye(ncol)[:, diag <= 0]], axis=1)
-    constrained = ~np.any(np.abs(null_scaled) > 1e-6, axis=1)
+    constrained = ~np.any(np.abs(null_scaled) > null_tol, axis=1)
     null = d[:, None] * V[:, ~keep]
     return {
         "x": cov @ rhs,
