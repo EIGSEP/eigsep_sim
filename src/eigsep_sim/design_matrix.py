@@ -20,11 +20,16 @@ every sky pixel and every ground region, and subtracting it from the offset,
 leaves every row unchanged. Breaking it needs prior knowledge of the offset
 (an absolute calibration) or of the sky.
 
-Column ordering: ``[sky pixels (npix) | ground regions | offset groups]``.
+Column ordering: ``[sky pixels (npix) | ground regions | offset groups |
+sky templates]``. Sky templates (``DesignMatrix.with_sky_templates``) are
+fixed maps whose amplitude is fitted, e.g. ``T_sky = a * GSM + delta`` with a
+prior on ``delta`` only, so an overall scale error (a front-end loss, a
+mis-scaled GSM) goes into ``a`` instead of the ground temperature.
 """
 
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import dataclass, field
 
 import healpy
@@ -170,7 +175,7 @@ class DesignMatrix:
     """Per-frequency design matrix and its column bookkeeping.
 
     ``A`` has shape ``(nfreq, ntime, ncol)``; columns are
-    ``[sky pixels | ground regions | offset groups]``.
+    ``[sky pixels | ground regions | offset groups | sky templates]``.
     """
 
     A: np.ndarray
@@ -179,6 +184,7 @@ class DesignMatrix:
     ground_names: list = field(default_factory=lambda: ["ground"])
     offset_names: list = field(default_factory=lambda: ["offset"])
     sky_observed: np.ndarray | None = None
+    template_names: list = field(default_factory=list)
 
     @property
     def npix(self):
@@ -198,18 +204,61 @@ class DesignMatrix:
         return slice(start, start + len(self.offset_names))
 
     @property
+    def template(self):
+        start = self.offset.stop
+        return slice(start, start + len(self.template_names))
+
+    @property
     def column_names(self):
         return (
             [f"sky[{p}]" for p in range(self.npix)]
             + list(self.ground_names)
             + list(self.offset_names)
+            + list(self.template_names)
         )
 
-    def pack(self, sky, ground, offset):
+    def with_sky_templates(self, maps, names=None):
+        """Append one column per fixed sky map, whose amplitude is fitted.
+
+        ``maps`` is ``(nfreq, npix)`` for one template or
+        ``(ntemplate, nfreq, npix)``, Galactic, at ``nside_sky``. Each column
+        is the beam-weighted visible sky of that map, ``A_sky @ map``.
+        """
+        maps = np.asarray(maps, dtype=float)
+        if maps.ndim == 2:
+            maps = maps[None]
+        if maps.shape[1:] != (self.A.shape[0], self.npix):
+            raise ValueError(
+                f"maps must be (ntemplate, {self.A.shape[0]}, {self.npix}), "
+                f"got {maps.shape}"
+            )
+        if names is None:
+            names = (
+                ["template"] if len(maps) == 1
+                else [f"template[{k}]" for k in range(len(maps))]
+            )
+        cols = np.einsum("ftp,kfp->ftk", self.A[:, :, self.sky], maps)
+        return dataclasses.replace(
+            self,
+            A=np.concatenate([self.A, cols], axis=2),
+            template_names=list(self.template_names) + list(names),
+        )
+
+    def select_rows(self, rows):
+        """A design matrix restricted to ``rows`` (index or boolean mask)."""
+        A = self.A[:, rows]
+        return dataclasses.replace(
+            self,
+            A=A,
+            sky_observed=np.any(A[:, :, self.sky] > 0, axis=(0, 1)),
+        )
+
+    def pack(self, sky, ground, offset, template=0.0):
         """Assemble a parameter vector; each part broadcasts over frequency.
 
-        ``sky`` is ``(npix,)`` or ``(nfreq, npix)``; ``ground`` and ``offset``
-        are scalars, ``(n,)``, or ``(nfreq, n)``. Returns ``(nfreq, ncol)``.
+        ``sky`` is ``(npix,)`` or ``(nfreq, npix)``; ``ground``, ``offset``
+        and ``template`` are scalars, ``(n,)``, or ``(nfreq, n)``. Returns
+        ``(nfreq, ncol)``.
         """
         nfreq = self.A.shape[0]
         parts = []
@@ -217,6 +266,7 @@ class DesignMatrix:
             (sky, self.npix),
             (ground, len(self.ground_names)),
             (offset, len(self.offset_names)),
+            (template, len(self.template_names)),
         ):
             value = np.asarray(value, dtype=float)
             if value.ndim < 2:
