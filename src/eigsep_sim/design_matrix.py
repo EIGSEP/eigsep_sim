@@ -437,9 +437,13 @@ def solve(A, y, noise_sigma, prior_sigma=None, prior_mean=None, rcond=1e-12):
     """Gaussian-prior (MAP) least-squares solve at one frequency.
 
     Minimizes ``|(y - A x) / noise_sigma|^2 + |(x - prior_mean) / prior_sigma|^2``.
-    ``prior_sigma = inf`` (the default) leaves a column unconstrained; exactly
-    unconstrained directions are dropped by the eigenvalue cutoff ``rcond``
-    (relative to the largest eigenvalue) and returned as zero.
+    ``prior_sigma = inf`` (the default) leaves a column unconstrained. The
+    posterior precision is rescaled to unit diagonal before its
+    eigendecomposition, so ``rcond`` is independent of the columns' units;
+    directions below it are dropped (returned as zero) and reported in
+    ``null_vectors``. A column that moves along any of them is not
+    determined by the data and prior: ``constrained`` is False for it and its
+    entries of ``x`` and ``cov`` are a minimum-norm choice, not a measurement.
 
     Parameters
     ----------
@@ -452,8 +456,8 @@ def solve(A, y, noise_sigma, prior_sigma=None, prior_mean=None, rcond=1e-12):
     Returns
     -------
     dict
-        ``x`` (ncol,), ``cov`` (ncol, ncol), ``eigvals`` and ``eigvecs`` of
-        the posterior precision, and ``rank``.
+        ``x`` (ncol,), ``cov`` (ncol, ncol), ``rank``, ``null_vectors``
+        (ncol, nnull) in parameter units, and ``constrained`` (ncol,) bool.
     """
     A = np.asarray(A, dtype=float)
     ncol = A.shape[1]
@@ -463,16 +467,24 @@ def solve(A, y, noise_sigma, prior_sigma=None, prior_mean=None, rcond=1e-12):
     Aw = A * w[:, None]
     precision = Aw.T @ Aw + np.diag(1.0 / prior_sigma**2)
     rhs = Aw.T @ (y * w) + prior_mean / prior_sigma**2
-    lam, V = np.linalg.eigh(precision)
+
+    diag = np.diag(precision)
+    d = np.where(diag > 0, 1.0 / np.sqrt(np.where(diag > 0, diag, 1.0)), 0.0)
+    lam, V = np.linalg.eigh(precision * np.outer(d, d))
     keep = lam > rcond * lam[-1]
     inv = np.where(keep, 1.0 / np.where(keep, lam, 1.0), 0.0)
-    cov = (V * inv) @ V.T
+    cov = (d[:, None] * V * inv) @ (V.T * d[None, :])
+
+    null_scaled = np.concatenate(
+        [V[:, ~keep], np.eye(ncol)[:, diag <= 0]], axis=1)
+    constrained = ~np.any(np.abs(null_scaled) > 1e-6, axis=1)
+    null = d[:, None] * V[:, ~keep]
     return {
         "x": cov @ rhs,
         "cov": cov,
-        "eigvals": lam,
-        "eigvecs": V,
         "rank": int(keep.sum()),
+        "null_vectors": null,
+        "constrained": constrained,
     }
 
 
@@ -507,8 +519,7 @@ def fisher_summary(dm, freq_index, noise_sigma, prior_sigma=None, rcond=1e-12):
     sol = solve(A, np.zeros(ntime), noise_sigma, prior_sigma=prior_sigma,
                 rcond=rcond)
     cov = sol["cov"]
-    lam, V = sol["eigvals"], sol["eigvecs"]
-    null = V[:, lam <= rcond * lam[-1]]
+    null = sol["null_vectors"]
     nonsky = np.arange(dm.npix, ncol)
     sub = cov[np.ix_(nonsky, nonsky)]
     sigma = np.sqrt(np.clip(np.diag(sub), 0.0, None))
@@ -516,14 +527,13 @@ def fisher_summary(dm, freq_index, noise_sigma, prior_sigma=None, rcond=1e-12):
         corr = sub / np.outer(sigma, sigma)
     # The pseudo-inverse treats null directions as known; any column that
     # moves along one is in fact unconstrained.
-    tol = 1e-6
-    sigma[np.any(np.abs(null[nonsky]) > tol, axis=1)] = np.inf
+    sigma[~sol["constrained"][nonsky]] = np.inf
 
     e = np.zeros(ncol)
     obs = dm.sky_observed
     e[:dm.npix][obs] = 1.0 / max(int(obs.sum()), 1)
     sigma_sky_mean = float(np.sqrt(max(e @ cov @ e, 0.0)))
-    if np.any(np.abs(e @ null) > tol / max(int(obs.sum()), 1)):
+    if null.size and np.any(np.abs(e @ null) > 1e-6 * np.abs(null).max()):
         sigma_sky_mean = np.inf
     return {
         "names": [dm.column_names[i] for i in nonsky],

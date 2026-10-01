@@ -140,9 +140,10 @@ def test_fisher_summary_reports_degenerate_direction():
     out = fisher_summary(dm, 0, noise_sigma=0.1)
     assert out["names"] == ["ground", "offset"]
     # Unconstrained: the uniform (sky + ground, -offset) direction is null.
-    assert out["null_vectors"].shape[0] >= 1
-    v = out["null_vectors"][0]
-    assert np.sign(v[0]) == -np.sign(v[1])
+    null = solve(dm.A[0], np.zeros(dm.A.shape[1]), 0.1)["null_vectors"]
+    uniform = dm.pack(dm.sky_observed.astype(float), 1.0, -1.0)[0]
+    coef, *_ = np.linalg.lstsq(null, uniform, rcond=None)
+    np.testing.assert_allclose(null @ coef, uniform, atol=1e-6)
     assert np.all(np.isinf(out["sigma"]))
     assert np.isinf(out["sigma_sky_mean"])
     # Pinning the offset is not enough for one fixed pointing: the ground
@@ -212,3 +213,44 @@ def test_select_rows_keeps_columns_and_recomputes_observed():
     np.testing.assert_array_equal(
         sub.sky_observed, np.any(dm.A[:, :10, dm.sky] > 0, axis=(0, 1))
     )
+
+
+def test_solve_is_independent_of_column_units():
+    rng = np.random.default_rng(2)
+    dm = _three_pointing_dm()
+    gsm = 200 + 50 * rng.standard_normal(dm.npix)
+    dmt = dm.with_sky_templates(gsm[None])
+    delta = 0.1 * gsm * rng.standard_normal(dm.npix)
+    y = dmt.A[0] @ dmt.pack(delta, 290.0, 5.0, template=0.9)[0]
+    y = y + 0.01 * rng.standard_normal(len(y))
+    prior = dmt.pack(0.1 * gsm, np.inf, np.inf, template=np.inf)[0]
+    ref = solve(dmt.A[0], y, 0.01, prior_sigma=prior)
+
+    scale = np.ones(dmt.A.shape[2])
+    scale[dmt.template] = 1e6  # template column in wildly different units
+    scaled = solve(dmt.A[0] * scale, y, 0.01, prior_sigma=prior / scale)
+    np.testing.assert_array_equal(scaled["constrained"], ref["constrained"])
+    np.testing.assert_allclose(scaled["x"] * scale, ref["x"], rtol=1e-4, atol=1e-4)
+    assert ref["constrained"][dmt.ground.start]
+    a = dmt.template.start
+    assert ref["x"][a] == pytest.approx(0.9, abs=3 * np.sqrt(ref["cov"][a, a]))
+
+
+def test_solve_flags_ground_offset_degeneracy_at_one_pointing():
+    dm = build_design_matrix(
+        _dipole_beam(1), HorizonProfile.flat(), _sky_rotations(30),
+        np.eye(3), nside_sky=2, nside_int=32,
+    )
+    rng = np.random.default_rng(3)
+    gsm = 200 + 50 * rng.standard_normal(dm.npix)
+    dmt = dm.with_sky_templates(gsm[None])
+    prior = dmt.pack(0.1 * gsm, np.inf, np.inf, template=np.inf)[0]
+    y = dmt.A[0] @ dmt.pack(0.0, 290.0, 5.0, template=1.0)[0]
+    sol = solve(dmt.A[0], y, 0.01, prior_sigma=prior)
+    assert not sol["constrained"][dmt.ground.start]
+    assert not sol["constrained"][dmt.offset.start]
+    assert sol["constrained"][dmt.template.start]
+    # The pedestal they share is still determined.
+    f_gnd = dmt.A[0, 0, dmt.ground.start]
+    pedestal = f_gnd * sol["x"][dmt.ground.start] + sol["x"][dmt.offset.start]
+    assert pedestal == pytest.approx(f_gnd * 290.0 + 5.0, abs=0.5)
