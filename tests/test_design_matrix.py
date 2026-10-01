@@ -140,9 +140,10 @@ def test_fisher_summary_reports_degenerate_direction():
     out = fisher_summary(dm, 0, noise_sigma=0.1)
     assert out["names"] == ["ground", "offset"]
     # Unconstrained: the uniform (sky + ground, -offset) direction is null.
-    assert out["null_vectors"].shape[0] >= 1
-    v = out["null_vectors"][0]
-    assert np.sign(v[0]) == -np.sign(v[1])
+    null = solve(dm.A[0], np.zeros(dm.A.shape[1]), 0.1)["null_vectors"]
+    uniform = dm.pack(dm.sky_observed.astype(float), 1.0, -1.0)[0]
+    coef, *_ = np.linalg.lstsq(null, uniform, rcond=None)
+    np.testing.assert_allclose(null @ coef, uniform, atol=1e-6)
     assert np.all(np.isinf(out["sigma"]))
     assert np.isinf(out["sigma_sky_mean"])
     # Pinning the offset is not enough for one fixed pointing: the ground
@@ -151,3 +152,105 @@ def test_fisher_summary_reports_degenerate_direction():
                             prior_sigma=dm.pack(np.inf, np.inf, 1.0)[0])
     assert np.isinf(pinned["sigma"][0])
     assert pinned["sigma"][1] == pytest.approx(1.0)
+
+
+def _three_pointing_dm(nper=40, nside_sky=2):
+    az = np.repeat([0.0, 60.0, 120.0], nper)
+    el = np.repeat([0.0, 45.0, 75.0], nper)
+    return build_design_matrix(
+        _dipole_beam(1),
+        HorizonProfile([0, 90, 180, 270], [0.1, 0.3, 0.0, 0.2]),
+        np.tile(_sky_rotations(nper), (3, 1, 1)),
+        mount_rotation(az, el, 142.164), nside_sky=nside_sky, nside_int=32,
+    )
+
+
+def test_sky_template_column_is_beam_weighted_map():
+    dm = _three_pointing_dm()
+    sky_map = np.arange(dm.npix, dtype=float)[None]
+    dmt = dm.with_sky_templates(sky_map, names=["gsm"])
+    assert dmt.column_names[-1] == "gsm"
+    assert dmt.template == slice(dm.A.shape[2], dm.A.shape[2] + 1)
+    np.testing.assert_allclose(
+        dmt.A[0, :, dmt.template.start], dm.A[0, :, dm.sky] @ sky_map[0]
+    )
+    # Zero template amplitude reproduces the original prediction.
+    x = dm.pack(sky_map, 290.0, 3.0)
+    np.testing.assert_allclose(
+        dmt.predict(dmt.pack(sky_map, 290.0, 3.0, template=0.0)),
+        dm.predict(x),
+    )
+
+
+def test_sky_template_absorbs_scale_error_instead_of_ground():
+    rng = np.random.default_rng(1)
+    dm = _three_pointing_dm()
+    gsm = 200 + 50 * rng.standard_normal(dm.npix)
+    eta = 0.85  # the data see a scaled sky, e.g. through a lossy front end
+    y = dm.A[0] @ dm.pack(eta * gsm, 290.0, 0.0)[0]
+    g = dm.ground.start
+
+    # Prior centred on the unscaled map: the scale error lands in ground.
+    centred = dm.pack(0.02 * gsm, np.inf, 1e-3)[0]
+    fit = solve(dm.A[0], y, 0.01, prior_sigma=centred,
+                prior_mean=dm.pack(gsm, 0.0, 0.0)[0])
+    bias_centred = abs(fit["x"][g] - 290.0)
+    assert bias_centred > 5.0
+
+    # Template amplitude free, prior only on the residual sky.
+    dmt = dm.with_sky_templates(gsm[None])
+    prior = dmt.pack(0.02 * gsm, np.inf, 1e-3, template=np.inf)[0]
+    fit = solve(dmt.A[0], y, 0.01, prior_sigma=prior)
+    assert fit["x"][dmt.template.start] == pytest.approx(eta, abs=0.01)
+    assert abs(fit["x"][g] - 290.0) < 0.1 * bias_centred
+
+
+def test_select_rows_keeps_columns_and_recomputes_observed():
+    dm = _three_pointing_dm().with_sky_templates(np.ones((1, 1, 48)))
+    sub = dm.select_rows(np.arange(10))
+    assert sub.A.shape == (1, 10, dm.A.shape[2])
+    assert sub.template_names == dm.template_names
+    np.testing.assert_array_equal(
+        sub.sky_observed, np.any(dm.A[:, :10, dm.sky] > 0, axis=(0, 1))
+    )
+
+
+def test_solve_is_independent_of_column_units():
+    rng = np.random.default_rng(2)
+    dm = _three_pointing_dm()
+    gsm = 200 + 50 * rng.standard_normal(dm.npix)
+    dmt = dm.with_sky_templates(gsm[None])
+    delta = 0.1 * gsm * rng.standard_normal(dm.npix)
+    y = dmt.A[0] @ dmt.pack(delta, 290.0, 5.0, template=0.9)[0]
+    y = y + 0.01 * rng.standard_normal(len(y))
+    prior = dmt.pack(0.1 * gsm, np.inf, np.inf, template=np.inf)[0]
+    ref = solve(dmt.A[0], y, 0.01, prior_sigma=prior)
+
+    scale = np.ones(dmt.A.shape[2])
+    scale[dmt.template] = 1e6  # template column in wildly different units
+    scaled = solve(dmt.A[0] * scale, y, 0.01, prior_sigma=prior / scale)
+    np.testing.assert_array_equal(scaled["constrained"], ref["constrained"])
+    np.testing.assert_allclose(scaled["x"] * scale, ref["x"], rtol=1e-4, atol=1e-4)
+    assert ref["constrained"][dmt.ground.start]
+    a = dmt.template.start
+    assert ref["x"][a] == pytest.approx(0.9, abs=3 * np.sqrt(ref["cov"][a, a]))
+
+
+def test_solve_flags_ground_offset_degeneracy_at_one_pointing():
+    dm = build_design_matrix(
+        _dipole_beam(1), HorizonProfile.flat(), _sky_rotations(30),
+        np.eye(3), nside_sky=2, nside_int=32,
+    )
+    rng = np.random.default_rng(3)
+    gsm = 200 + 50 * rng.standard_normal(dm.npix)
+    dmt = dm.with_sky_templates(gsm[None])
+    prior = dmt.pack(0.1 * gsm, np.inf, np.inf, template=np.inf)[0]
+    y = dmt.A[0] @ dmt.pack(0.0, 290.0, 5.0, template=1.0)[0]
+    sol = solve(dmt.A[0], y, 0.01, prior_sigma=prior)
+    assert not sol["constrained"][dmt.ground.start]
+    assert not sol["constrained"][dmt.offset.start]
+    assert sol["constrained"][dmt.template.start]
+    # The pedestal they share is still determined.
+    f_gnd = dmt.A[0, 0, dmt.ground.start]
+    pedestal = f_gnd * sol["x"][dmt.ground.start] + sol["x"][dmt.offset.start]
+    assert pedestal == pytest.approx(f_gnd * 290.0 + 5.0, abs=0.5)
