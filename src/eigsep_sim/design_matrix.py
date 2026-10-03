@@ -20,11 +20,16 @@ every sky pixel and every ground region, and subtracting it from the offset,
 leaves every row unchanged. Breaking it needs prior knowledge of the offset
 (an absolute calibration) or of the sky.
 
-Column ordering: ``[sky pixels (npix) | ground regions | offset groups]``.
+Column ordering: ``[sky pixels (npix) | ground regions | offset groups |
+sky templates]``. Sky templates (``DesignMatrix.with_sky_templates``) are
+fixed maps whose amplitude is fitted, e.g. ``T_sky = a * GSM + delta`` with a
+prior on ``delta`` only, so an overall scale error (a front-end loss, a
+mis-scaled GSM) goes into ``a`` instead of the ground temperature.
 """
 
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import dataclass, field
 
 import healpy
@@ -170,7 +175,7 @@ class DesignMatrix:
     """Per-frequency design matrix and its column bookkeeping.
 
     ``A`` has shape ``(nfreq, ntime, ncol)``; columns are
-    ``[sky pixels | ground regions | offset groups]``.
+    ``[sky pixels | ground regions | offset groups | sky templates]``.
     """
 
     A: np.ndarray
@@ -179,6 +184,7 @@ class DesignMatrix:
     ground_names: list = field(default_factory=lambda: ["ground"])
     offset_names: list = field(default_factory=lambda: ["offset"])
     sky_observed: np.ndarray | None = None
+    template_names: list = field(default_factory=list)
 
     @property
     def npix(self):
@@ -198,18 +204,61 @@ class DesignMatrix:
         return slice(start, start + len(self.offset_names))
 
     @property
+    def template(self):
+        start = self.offset.stop
+        return slice(start, start + len(self.template_names))
+
+    @property
     def column_names(self):
         return (
             [f"sky[{p}]" for p in range(self.npix)]
             + list(self.ground_names)
             + list(self.offset_names)
+            + list(self.template_names)
         )
 
-    def pack(self, sky, ground, offset):
+    def with_sky_templates(self, maps, names=None):
+        """Append one column per fixed sky map, whose amplitude is fitted.
+
+        ``maps`` is ``(nfreq, npix)`` for one template or
+        ``(ntemplate, nfreq, npix)``, Galactic, at ``nside_sky``. Each column
+        is the beam-weighted visible sky of that map, ``A_sky @ map``.
+        """
+        maps = np.asarray(maps, dtype=float)
+        if maps.ndim == 2:
+            maps = maps[None]
+        if maps.shape[1:] != (self.A.shape[0], self.npix):
+            raise ValueError(
+                f"maps must be (ntemplate, {self.A.shape[0]}, {self.npix}), "
+                f"got {maps.shape}"
+            )
+        if names is None:
+            names = (
+                ["template"] if len(maps) == 1
+                else [f"template[{k}]" for k in range(len(maps))]
+            )
+        cols = np.einsum("ftp,kfp->ftk", self.A[:, :, self.sky], maps)
+        return dataclasses.replace(
+            self,
+            A=np.concatenate([self.A, cols], axis=2),
+            template_names=list(self.template_names) + list(names),
+        )
+
+    def select_rows(self, rows):
+        """A design matrix restricted to ``rows`` (index or boolean mask)."""
+        A = self.A[:, rows]
+        return dataclasses.replace(
+            self,
+            A=A,
+            sky_observed=np.any(A[:, :, self.sky] > 0, axis=(0, 1)),
+        )
+
+    def pack(self, sky, ground, offset, template=0.0):
         """Assemble a parameter vector; each part broadcasts over frequency.
 
-        ``sky`` is ``(npix,)`` or ``(nfreq, npix)``; ``ground`` and ``offset``
-        are scalars, ``(n,)``, or ``(nfreq, n)``. Returns ``(nfreq, ncol)``.
+        ``sky`` is ``(npix,)`` or ``(nfreq, npix)``; ``ground``, ``offset``
+        and ``template`` are scalars, ``(n,)``, or ``(nfreq, n)``. Returns
+        ``(nfreq, ncol)``.
         """
         nfreq = self.A.shape[0]
         parts = []
@@ -217,6 +266,7 @@ class DesignMatrix:
             (sky, self.npix),
             (ground, len(self.ground_names)),
             (offset, len(self.offset_names)),
+            (template, len(self.template_names)),
         ):
             value = np.asarray(value, dtype=float)
             if value.ndim < 2:
@@ -383,13 +433,18 @@ def _as_column_array(value, ncol, default):
     return np.broadcast_to(np.asarray(value, dtype=float), (ncol,))
 
 
-def solve(A, y, noise_sigma, prior_sigma=None, prior_mean=None, rcond=1e-12):
+def solve(A, y, noise_sigma, prior_sigma=None, prior_mean=None, rcond=1e-12,
+          null_tol=1e-3):
     """Gaussian-prior (MAP) least-squares solve at one frequency.
 
     Minimizes ``|(y - A x) / noise_sigma|^2 + |(x - prior_mean) / prior_sigma|^2``.
-    ``prior_sigma = inf`` (the default) leaves a column unconstrained; exactly
-    unconstrained directions are dropped by the eigenvalue cutoff ``rcond``
-    (relative to the largest eigenvalue) and returned as zero.
+    ``prior_sigma = inf`` (the default) leaves a column unconstrained. The
+    posterior precision is rescaled to unit diagonal before its
+    eigendecomposition, so ``rcond`` is independent of the columns' units;
+    directions below it are dropped (returned as zero) and reported in
+    ``null_vectors``. A column that moves along any of them is not
+    determined by the data and prior: ``constrained`` is False for it and its
+    entries of ``x`` and ``cov`` are a minimum-norm choice, not a measurement.
 
     Parameters
     ----------
@@ -398,12 +453,18 @@ def solve(A, y, noise_sigma, prior_sigma=None, prior_mean=None, rcond=1e-12):
     y : ndarray, shape (ntime,)
     noise_sigma : float or ndarray, shape (ntime,)
     prior_sigma, prior_mean : float or ndarray, shape (ncol,), optional
+    rcond : float
+        Eigenvalue cutoff of the unit-diagonal precision, relative to its
+        largest eigenvalue.
+    null_tol : float
+        A column is unconstrained if any unit-norm null vector of the
+        unit-diagonal precision has a component above this on it.
 
     Returns
     -------
     dict
-        ``x`` (ncol,), ``cov`` (ncol, ncol), ``eigvals`` and ``eigvecs`` of
-        the posterior precision, and ``rank``.
+        ``x`` (ncol,), ``cov`` (ncol, ncol), ``rank``, ``null_vectors``
+        (ncol, nnull) in parameter units, and ``constrained`` (ncol,) bool.
     """
     A = np.asarray(A, dtype=float)
     ncol = A.shape[1]
@@ -413,16 +474,27 @@ def solve(A, y, noise_sigma, prior_sigma=None, prior_mean=None, rcond=1e-12):
     Aw = A * w[:, None]
     precision = Aw.T @ Aw + np.diag(1.0 / prior_sigma**2)
     rhs = Aw.T @ (y * w) + prior_mean / prior_sigma**2
-    lam, V = np.linalg.eigh(precision)
+
+    diag = np.diag(precision)
+    d = np.where(diag > 0, 1.0 / np.sqrt(np.where(diag > 0, diag, 1.0)), 0.0)
+    lam, V = np.linalg.eigh(precision * np.outer(d, d))
     keep = lam > rcond * lam[-1]
     inv = np.where(keep, 1.0 / np.where(keep, lam, 1.0), 0.0)
-    cov = (V * inv) @ V.T
+    cov = (d[:, None] * V * inv) @ (V.T * d[None, :])
+
+    # Null vectors are unit-norm in the scaled space; a column that really
+    # moves along one has a component of order 0.1-1, while eigenvector
+    # mixing among near-degenerate directions leaves ~1e-5 elsewhere.
+    null_scaled = np.concatenate(
+        [V[:, ~keep], np.eye(ncol)[:, diag <= 0]], axis=1)
+    constrained = ~np.any(np.abs(null_scaled) > null_tol, axis=1)
+    null = d[:, None] * V[:, ~keep]
     return {
         "x": cov @ rhs,
         "cov": cov,
-        "eigvals": lam,
-        "eigvecs": V,
         "rank": int(keep.sum()),
+        "null_vectors": null,
+        "constrained": constrained,
     }
 
 
@@ -457,8 +529,7 @@ def fisher_summary(dm, freq_index, noise_sigma, prior_sigma=None, rcond=1e-12):
     sol = solve(A, np.zeros(ntime), noise_sigma, prior_sigma=prior_sigma,
                 rcond=rcond)
     cov = sol["cov"]
-    lam, V = sol["eigvals"], sol["eigvecs"]
-    null = V[:, lam <= rcond * lam[-1]]
+    null = sol["null_vectors"]
     nonsky = np.arange(dm.npix, ncol)
     sub = cov[np.ix_(nonsky, nonsky)]
     sigma = np.sqrt(np.clip(np.diag(sub), 0.0, None))
@@ -466,14 +537,13 @@ def fisher_summary(dm, freq_index, noise_sigma, prior_sigma=None, rcond=1e-12):
         corr = sub / np.outer(sigma, sigma)
     # The pseudo-inverse treats null directions as known; any column that
     # moves along one is in fact unconstrained.
-    tol = 1e-6
-    sigma[np.any(np.abs(null[nonsky]) > tol, axis=1)] = np.inf
+    sigma[~sol["constrained"][nonsky]] = np.inf
 
     e = np.zeros(ncol)
     obs = dm.sky_observed
     e[:dm.npix][obs] = 1.0 / max(int(obs.sum()), 1)
     sigma_sky_mean = float(np.sqrt(max(e @ cov @ e, 0.0)))
-    if np.any(np.abs(e @ null) > tol / max(int(obs.sum()), 1)):
+    if null.size and np.any(np.abs(e @ null) > 1e-6 * np.abs(null).max()):
         sigma_sky_mean = np.inf
     return {
         "names": [dm.column_names[i] for i in nonsky],
