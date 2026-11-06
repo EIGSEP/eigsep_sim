@@ -13,14 +13,16 @@ import numpy as np
 import pytest
 import healpy
 from astropy.time import Time
-from astropy.coordinates import EarthLocation, get_body_barycentric
+from astropy.coordinates import (
+    AltAz, EarthLocation, GCRS, SkyCoord, get_body_barycentric
+)
 import astropy.units as u
 
 from eigsep_sim.observer import (
     Observer, EarthSurface, LunarSurface, LunarOrbit,
     circular_orbital_period, ICRS2GAL, _moon_icrs2mcmf
 )
-from eigsep_base.const import R_MOON, GM_MOON
+from eigsep_base.const import R_MOON, GM_MOON, MARJUM_PASS
 
 
 def test_observer_abstract():
@@ -120,6 +122,50 @@ def test_earth_surface_horizon_pole():
 
     # At north pole, roughly hemisphere should be visible
     assert 0.4 < frac_visible < 0.6
+
+
+@pytest.mark.parametrize("stack", [False, True])
+def test_earth_surface_rotation_matches_altaz(stack):
+    """EarthSurface: galactic -> topocentric agrees with astropy's AltAz.
+
+    Each direction is first taken to its apparent geocentric (GCRS) place,
+    since a rotation cannot carry the annual aberration (up to 20.5")
+    that AltAz applies. AltAz still adds the diurnal aberration,
+    0.32" cos(lat) = 0.25" here, which sets the 0.5" tolerance.
+    """
+    lat, lon, height = MARJUM_PASS
+    obs = EarthSurface(lat, lon, height)
+    times = Time("2026-07-17T03:00:00") + np.arange(0, 24, 4) * u.hour
+    gal = SkyCoord(
+        l=[0, 90, 180, 270, 45, 120] * u.deg,
+        b=[0, 0, 0, 30, -60, 85] * u.deg,
+        frame="galactic",
+    )
+    obstime = times[:, None]
+    gcrs = gal[None, :].transform_to(GCRS(obstime=obstime))
+    v_gal = np.einsum("ij,jtd->tid", ICRS2GAL, gcrs.cartesian.xyz.value)
+    altaz = gal[None, :].transform_to(
+        AltAz(obstime=obstime, location=obs.location, pressure=0 * u.hPa)
+    )
+    alt, az = altaz.alt.rad, altaz.az.rad
+    enu_ref = np.stack(
+        [np.cos(alt) * np.sin(az), np.cos(alt) * np.cos(az), np.sin(alt)],
+        axis=1,
+    )
+    if stack:
+        R = obs.rot_gal2top_stack(times)
+    else:
+        R = []
+        for t in times:
+            obs.set_time(t)
+            R.append(obs.rot_gal2top())
+        R = np.array(R)
+    enu = np.einsum("tij,tjd->tid", R.astype(float), v_gal)
+    sep = np.arctan2(
+        np.linalg.norm(np.cross(enu, enu_ref, axis=1), axis=1),
+        np.sum(enu * enu_ref, axis=1),
+    )
+    assert np.degrees(sep).max() * 3600 < 0.5
 
 
 def test_lunar_surface_basic():

@@ -8,10 +8,13 @@ All observers inherit from the Observer ABC and must implement:
 
 from __future__ import annotations
 
+import erfa
 import numpy as np
 import healpy
 from astropy.time import Time
-from astropy.coordinates import SkyCoord, CartesianRepresentation, EarthLocation
+from astropy.coordinates import (
+    SkyCoord, CartesianRepresentation, EarthLocation, CIRS, ITRS
+)
 import astropy.units as u
 from scipy.spatial.transform import Rotation
 from scipy.integrate import solve_ivp
@@ -106,22 +109,49 @@ class EarthSurface(Observer):
             lat=lat * u.deg, lon=lon * u.deg, height=height * u.m
         )
 
+    def _top2icrs_stack(self, times):
+        """
+        Local [east, north, up] unit vectors in ICRS axes, as the columns
+        of a (ntimes, 3, 3) array, for a 1-D Time array.
+
+        Up is the geodetic vertical (the ellipsoid normal, as in astropy's
+        AltAz) and north points to the pole of date. The ITRS vectors are
+        rotated to GCRS (whose axes are aligned with ICRS) through CIRS:
+        polar motion and Earth rotation angle (astropy), then IAU
+        2006/2000A precession-nutation: the matrix astropy's CIRS -> GCRS
+        transform applies, taken from erfa directly because the frame
+        transform is 3-5x slower for arrays of times.
+        """
+        lat = self.location.lat.rad
+        lon = self.location.lon.rad
+        sin_lat, cos_lat = np.sin(lat), np.cos(lat)
+        sin_lon, cos_lon = np.sin(lon), np.cos(lon)
+        # columns: north, up in ITRS
+        north_up_itrs = np.array(
+            [
+                [-sin_lat * cos_lon, cos_lat * cos_lon],
+                [-sin_lat * sin_lon, cos_lat * sin_lon],
+                [cos_lat, sin_lat],
+            ]
+        )
+        xyz = np.broadcast_to(north_up_itrs[:, None, :], (3, times.size, 2))
+        obstime = times[:, None]
+        itrs = ITRS(CartesianRepresentation(xyz, unit=u.m), obstime=obstime)
+        cirs = itrs.transform_to(CIRS(obstime=obstime))
+        xyz = cirs.cartesian.xyz.to_value(u.m)  # (3, ntimes, 2)
+        gcrs2cirs = erfa.c2i06a(times.tt.jd1, times.tt.jd2)  # (ntimes, 3, 3)
+        north, up = np.einsum("tji,jtk->kti", gcrs2cirs, xyz)  # (ntimes, 3)
+        east = np.cross(north, up)
+        return np.stack([east, north, up], axis=2)
+
     def rot_gal2top(self):
         """
         3x3 rotation matrix mapping galactic unit vectors to local
         topocentric unit vectors (x=east, y=north, z=up).
+
+        Up is the geodetic vertical and north points to the pole of date.
         """
-        gcrs = self.location.get_gcrs(self.time)
-        # GCRS cartesian components are aligned with ICRS axes
-        up = gcrs.cartesian.xyz.value.copy()
-        up /= np.linalg.norm(up)
-        # GCRS z-axis is the celestial intermediate pole ≈ geographic north
-        pole = np.array([0.0, 0.0, 1.0])
-        east = np.cross(pole, up)
-        east /= np.linalg.norm(east)
-        north = np.cross(up, east)
-        # columns of top2icrs are [east, north, up] expressed in ICRS
-        top2icrs = np.column_stack([east, north, up])
+        top2icrs = self._top2icrs_stack(self.time.reshape((1,)))[0]
         top2gal = ICRS2GAL @ top2icrs
         return top2gal.T  # gal2top = top2gal^{-1} = top2gal.T
 
@@ -129,24 +159,12 @@ class EarthSurface(Observer):
         """
         Batch rotation matrices for multiple times. Shape: (ntimes, 3, 3).
 
-        61× faster than calling rot_gal2top() in a loop for EarthSurface,
-        because astropy's GCRS transform is vectorised over Time arrays.
+        Same frame as rot_gal2top(), computed for all times at once.
         """
         from astropy.time import Time as ATime
         times = [ATime(t) if not isinstance(t, ATime) else t for t in times]
         times_arr = ATime(times)
-        # Batch GCRS: all ntimes positions in one call
-        gcrs_all = self.location.get_gcrs(times_arr)
-        up_all = gcrs_all.cartesian.xyz.value          # (3, ntimes)
-        up_all = up_all / np.linalg.norm(up_all, axis=0, keepdims=True)
-        pole = np.array([0.0, 0.0, 1.0])
-        # cross(pole, up_all.T) → (ntimes, 3), transpose → (3, ntimes)
-        east_all = np.cross(pole, up_all.T).T
-        east_all = east_all / np.linalg.norm(east_all, axis=0, keepdims=True)
-        north_all = np.cross(up_all.T, east_all.T).T
-        # top2icrs_batch[t] = column_stack([east_t, north_t, up_t]) → (3, 3)
-        # Stack: (ntimes, 3, 3) where axis 2 indexes [east, north, up] columns
-        top2icrs_batch = np.stack([east_all.T, north_all.T, up_all.T], axis=2)
+        top2icrs_batch = self._top2icrs_stack(times_arr)
         top2gal_batch = np.einsum('ij,tjk->tik', ICRS2GAL, top2icrs_batch)
         return top2gal_batch.transpose(0, 2, 1).astype(np.float32)  # gal2top
 
